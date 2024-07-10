@@ -121,8 +121,7 @@ class InlineCodeStyle {
   }
 
   @override
-  int get hashCode =>
-      Object.hash(style, header1, header2, header3, backgroundColor, radius);
+  int get hashCode => Object.hash(style, header1, header2, header3, backgroundColor, radius);
 }
 
 @immutable
@@ -165,6 +164,7 @@ class DefaultStyles {
     this.sizeSmall,
     this.sizeLarge,
     this.sizeHuge,
+    this.fontResolver,
   });
 
   final DefaultTextBlockStyle? h1;
@@ -193,6 +193,7 @@ class DefaultStyles {
   final DefaultTextBlockStyle? indent;
   final DefaultTextBlockStyle? align;
   final DefaultTextBlockStyle? leading;
+  final TextStyle? Function(TextStyle style)? fontResolver;
 
   static DefaultStyles getInstance(BuildContext context) {
     final themeData = Theme.of(context);
@@ -251,8 +252,8 @@ class DefaultStyles {
           const VerticalSpacing(0, 0),
           null,
         ),
-        paragraph: DefaultTextBlockStyle(baseStyle, const VerticalSpacing(0, 0),
-            const VerticalSpacing(0, 0), null),
+        paragraph: DefaultTextBlockStyle(
+            baseStyle, const VerticalSpacing(0, 0), const VerticalSpacing(0, 0), null),
         bold: const TextStyle(fontWeight: FontWeight.bold),
         subscript: const TextStyle(
           fontFeatures: [
@@ -374,6 +375,7 @@ class DefaultStyles {
       sizeSmall: other.sizeSmall ?? sizeSmall,
       sizeLarge: other.sizeLarge ?? sizeLarge,
       sizeHuge: other.sizeHuge ?? sizeHuge,
+      fontResolver: other.fontResolver ?? fontResolver,
     );
   }
 }
