@@ -54,6 +54,7 @@ class Attribute<T> extends Equatable {
     Attribute.image.key: Attribute.image,
     Attribute.video.key: Attribute.video,
     Attribute.lineHeight.key: Attribute.lineHeight,
+    Attribute.customBold.key: Attribute.customBold,
   });
 
   static const BoldAttribute bold = BoldAttribute();
@@ -85,6 +86,8 @@ class Attribute<T> extends Equatable {
   static const PlaceholderAttribute placeholder = PlaceholderAttribute();
 
   static const LineHeightAttribute lineHeight = LineHeightAttribute(null);
+
+  static const CustomBoldAttribute customBold = CustomBoldAttribute(null);
 
   static const HeaderAttribute header = HeaderAttribute();
 
@@ -323,6 +326,10 @@ class HeaderAttribute extends Attribute<int?> {
 
 class LineHeightAttribute extends Attribute<double?> {
   const LineHeightAttribute(double? height) : super('lineHeight', AttributeScope.block, height);
+}
+
+class CustomBoldAttribute extends Attribute<bool?> {
+  const CustomBoldAttribute(bool? bold) : super('customBold', AttributeScope.inline, bold);
 }
 
 class IndentAttribute extends Attribute<int?> {
