@@ -206,6 +206,7 @@ class DefaultStyles {
     this.sizeSmall,
     this.sizeLarge,
     this.sizeHuge,
+    this.fontResolver,
     this.palette,
   });
 
@@ -242,6 +243,7 @@ class DefaultStyles {
   final DefaultTextBlockStyle? indent;
   final DefaultTextBlockStyle? align;
   final DefaultTextBlockStyle? leading;
+  final TextStyle? Function(TextStyle style)? fontResolver;
 
   /// Custom palette of colors
   final Map<String, Color>? palette;
@@ -524,6 +526,7 @@ class DefaultStyles {
       sizeLarge: other.sizeLarge ?? sizeLarge,
       sizeHuge: other.sizeHuge ?? sizeHuge,
       palette: other.palette ?? palette,
+      fontResolver: other.fontResolver ?? fontResolver,
     );
   }
 }

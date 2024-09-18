@@ -531,7 +531,7 @@ class _TextLineState extends State<TextLine> {
     }
 
     res = _applyCustomAttributes(res, nodeStyle.attributes);
-    return res;
+    return defaultStyles.fontResolver?.call(res) ?? res;
   }
 
   GestureRecognizer? _getRecognizer(Node segment, bool isLink) {
