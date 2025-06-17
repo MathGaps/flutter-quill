@@ -6,11 +6,10 @@ import 'dart:ui' as ui hide TextStyle;
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show RenderAbstractViewport;
+import 'package:flutter/rendering.dart' show RevealedOffset;
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
-import 'package:flutter/services.dart'
-    show Clipboard, HardwareKeyboard, SystemChannels, TextInputControl;
-import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart'
+import 'package:flutter/services.dart';
+import 'package:flutter_keyboard_visibility_temp_fork/flutter_keyboard_visibility_temp_fork.dart'
     show KeyboardVisibilityController;
 
 import '../../common/structs/horizontal_spacing.dart';
@@ -22,25 +21,22 @@ import '../../delta/delta_diff.dart';
 import '../../document/attribute.dart';
 import '../../document/document.dart';
 import '../../document/nodes/block.dart';
-import '../../document/nodes/embeddable.dart';
 import '../../document/nodes/line.dart';
 import '../../document/nodes/node.dart';
-import '../../editor_toolbar_controller_shared/clipboard/clipboard_service_provider.dart';
 import '../editor.dart';
 import '../widgets/cursor.dart';
 import '../widgets/default_styles.dart';
-import '../widgets/keyboard_service_widget.dart';
 import '../widgets/link.dart';
 import '../widgets/proxy.dart';
 import '../widgets/text/text_block.dart';
 import '../widgets/text/text_line.dart';
 import '../widgets/text/text_selection.dart';
+import 'keyboard_shortcuts/editor_keyboard_shortcut_actions_manager.dart';
+import 'keyboard_shortcuts/editor_keyboard_shortcuts.dart';
 import 'raw_editor.dart';
-import 'raw_editor_actions.dart';
 import 'raw_editor_render_object.dart';
 import 'raw_editor_state_selection_delegate_mixin.dart';
 import 'raw_editor_state_text_input_client_mixin.dart';
-import 'raw_editor_text_boundaries.dart';
 import 'scribble_focusable.dart';
 
 class QuillRawEditorState extends EditorState
@@ -50,6 +46,8 @@ class QuillRawEditorState extends EditorState
         TickerProviderStateMixin<QuillRawEditor>,
         RawEditorStateTextInputClientMixin,
         RawEditorStateSelectionDelegateMixin {
+  late final EditorKeyboardShortcutsActionsManager _shortcutActionsManager;
+
   final GlobalKey _editorKey = GlobalKey();
 
   KeyboardVisibilityController? _keyboardVisibilityController;
@@ -73,7 +71,7 @@ class QuillRawEditorState extends EditorState
   // Focus
   bool _didAutoFocus = false;
 
-  bool get _hasFocus => widget.configurations.focusNode.hasFocus;
+  bool get _hasFocus => widget.config.focusNode.hasFocus;
 
   // Theme
   DefaultStyles? _styles;
@@ -96,12 +94,63 @@ class QuillRawEditorState extends EditorState
   bool get dirty => _dirty;
   bool _dirty = false;
 
+  // Completely copied from flutter with some changes to fit flutter_quill:
+  // https://github.com/flutter/flutter/blob/3.29.0/packages/flutter/lib/src/widgets/editable_text.dart#L3741
+  // Finds the closest scroll offset to the current scroll offset that fully
+  // reveals the given caret rect. If the given rect's main axis extent is too
+  // large to be fully revealed in `renderEditable`, it will be centered along
+  // the main axis.
+  //
+  // If this is a multiline EditableText (which means the Editable can only
+  // scroll vertically), the given rect's height will first be extended to match
+  // `renderEditable.preferredLineHeight`, before the target scroll offset is
+  // calculated.
+  RevealedOffset _getOffsetToRevealCaret(Rect rect) {
+    if (!_scrollController.position.allowImplicitScrolling) {
+      return RevealedOffset(offset: _scrollController.offset, rect: rect);
+    }
+
+    final editableSize = renderEditor.size;
+    final double additionalOffset;
+    final Offset unitOffset;
+
+    // The caret is vertically centered within the line. Expand the caret's
+    // height so that it spans the line because we're going to ensure that the
+    // entire expanded caret is scrolled into view.
+    final expandedRect = Rect.fromCenter(
+      center: rect.center,
+      width: rect.width,
+      height: math.max(
+        rect.height,
+        renderEditor.preferredLineHeight(renderEditor.caretTextPosition),
+      ),
+    );
+
+    additionalOffset = expandedRect.height >= editableSize.height
+        ? editableSize.height / 2 - expandedRect.center.dy
+        : ui.clampDouble(
+            0, expandedRect.bottom - editableSize.height, expandedRect.top);
+    unitOffset = const Offset(0, 1);
+
+    // No overscrolling when encountering tall fonts/scripts that extend past
+    // the ascent.
+    final targetOffset = ui.clampDouble(
+      additionalOffset + _scrollController.offset,
+      _scrollController.position.minScrollExtent,
+      _scrollController.position.maxScrollExtent,
+    );
+
+    final offsetDelta = _scrollController.offset - targetOffset;
+    return RevealedOffset(
+        rect: rect.shift(unitOffset * offsetDelta), offset: targetOffset);
+  }
+
   @override
   void insertContent(KeyboardInsertedContent content) {
-    assert(widget.configurations.contentInsertionConfiguration?.allowedMimeTypes
+    assert(widget.config.contentInsertionConfiguration?.allowedMimeTypes
             .contains(content.mimeType) ??
         false);
-    widget.configurations.contentInsertionConfiguration?.onContentInserted
+    widget.config.contentInsertionConfiguration?.onContentInserted
         .call(content);
   }
 
@@ -147,44 +196,6 @@ class QuillRawEditorState extends EditorState
     if (await controller.clipboardPaste()) {
       bringIntoView(textEditingValue.selection.extent);
       return;
-    }
-
-    final clipboardService = ClipboardServiceProvider.instance;
-
-    final onImagePaste = widget.configurations.onImagePaste;
-    if (onImagePaste != null) {
-      if (await clipboardService.canProvideImageFile()) {
-        final imageBytes = await clipboardService.getImageFileAsBytes();
-        final imageUrl = await onImagePaste(imageBytes);
-        if (imageUrl == null) {
-          return;
-        }
-
-        controller.replaceText(
-          textEditingValue.selection.end,
-          0,
-          BlockEmbed.image(imageUrl),
-          null,
-        );
-      }
-    }
-
-    final onGifPaste = widget.configurations.onGifPaste;
-    if (onGifPaste != null) {
-      if (await clipboardService.canProvideGifFile()) {
-        final gifBytes = await clipboardService.getGifFileAsBytes();
-        final gifUrl = await onGifPaste(gifBytes);
-        if (gifUrl == null) {
-          return;
-        }
-
-        controller.replaceText(
-          textEditingValue.selection.end,
-          0,
-          BlockEmbed.image(gifUrl),
-          null,
-        );
-      }
     }
   }
 
@@ -349,7 +360,7 @@ class QuillRawEditorState extends EditorState
           case ui.PointerDeviceKind.stylus:
           case ui.PointerDeviceKind.invertedStylus:
           case ui.PointerDeviceKind.unknown:
-            widget.configurations.focusNode.unfocus();
+            widget.config.focusNode.unfocus();
             break;
           case ui.PointerDeviceKind.trackpad:
             throw UnimplementedError(
@@ -360,30 +371,24 @@ class QuillRawEditorState extends EditorState
       case TargetPlatform.linux:
       case TargetPlatform.macOS:
       case TargetPlatform.windows:
-        widget.configurations.focusNode.unfocus();
+        widget.config.focusNode.unfocus();
         break;
-      default:
-        throw UnsupportedError(
-          'The platform ${defaultTargetPlatform.name} is not supported in the'
-          ' _defaultOnTapOutside()',
-        );
     }
   }
 
   Widget _scribbleFocusable(Widget child) {
     return ScribbleFocusable(
       editorKey: _editorKey,
-      enabled: widget.configurations.enableScribble &&
-          !widget.configurations.readOnly,
+      enabled: widget.config.enableScribble && !widget.config.readOnly,
       renderBoxForBounds: () => context
           .findAncestorStateOfType<QuillEditorState>()
           ?.context
           .findRenderObject() as RenderBox?,
       onScribbleFocus: (offset) {
-        widget.configurations.focusNode.requestFocus();
-        widget.configurations.onScribbleActivated?.call();
+        widget.config.focusNode.requestFocus();
+        widget.config.onScribbleActivated?.call();
       },
-      scribbleAreaInsets: widget.configurations.scribbleAreaInsets,
+      scribbleAreaInsets: widget.config.scribbleAreaInsets,
       child: child,
     );
   }
@@ -394,8 +399,8 @@ class QuillRawEditorState extends EditorState
     super.build(context);
 
     var doc = controller.document;
-    if (doc.isEmpty() && widget.configurations.placeholder != null) {
-      final raw = widget.configurations.placeholder?.replaceAll(r'"', '\\"');
+    if (doc.isEmpty() && widget.config.placeholder != null) {
+      final raw = widget.config.placeholder?.replaceAll(r'"', '\\"');
       // get current block attributes applied to the first line even if it
       // is empty
       final blockAttributesWithoutContent =
@@ -416,7 +421,7 @@ class QuillRawEditorState extends EditorState
       );
     }
 
-    if (!widget.configurations.disableClipboard) {
+    if (!widget.config.disableClipboard) {
       // Web - esp Safari Mac/iOS has security measures in place that restrict
       // cliboard status checks w/o direct user interaction. Initializing the
       // ClipboardStatusNotifier with a default value of unknown will cause the
@@ -430,7 +435,7 @@ class QuillRawEditorState extends EditorState
     }
 
     Widget child;
-    if (widget.configurations.scrollable) {
+    if (widget.config.scrollable) {
       /// Since [SingleChildScrollView] does not implement
       /// `computeDistanceToActualBaseline` it prevents the editor from
       /// providing its baseline metrics. To address this issue we wrap
@@ -445,12 +450,12 @@ class QuillRawEditorState extends EditorState
           child: _scribbleFocusable(
             SingleChildScrollView(
               controller: _scrollController,
-              physics: widget.configurations.scrollPhysics,
+              physics: widget.config.scrollPhysics,
               child: CompositedTransformTarget(
                 link: _toolbarLayerLink,
                 child: MouseRegion(
-                  cursor: widget.configurations.readOnly
-                      ? widget.configurations.readOnlyMouseCursor
+                  cursor: widget.config.readOnly
+                      ? widget.config.readOnlyMouseCursor
                       : SystemMouseCursors.text,
                   child: QuillRawEditorMultiChildRenderObject(
                     key: _editorKey,
@@ -460,18 +465,18 @@ class QuillRawEditorState extends EditorState
                     document: doc,
                     selection: controller.selection,
                     hasFocus: _hasFocus,
-                    scrollable: widget.configurations.scrollable,
+                    scrollable: widget.config.scrollable,
                     textDirection: _textDirection,
                     startHandleLayerLink: _startHandleLayerLink,
                     endHandleLayerLink: _endHandleLayerLink,
                     onSelectionChanged: _handleSelectionChanged,
                     onSelectionCompleted: _handleSelectionCompleted,
-                    scrollBottomInset: widget.configurations.scrollBottomInset,
-                    padding: widget.configurations.padding,
-                    maxContentWidth: widget.configurations.maxContentWidth,
+                    scrollBottomInset: widget.config.scrollBottomInset,
+                    padding: widget.config.padding,
+                    maxContentWidth: widget.config.maxContentWidth,
                     cursorController: _cursorCont,
                     floatingCursorDisabled:
-                        widget.configurations.floatingCursorDisabled,
+                        widget.config.floatingCursorDisabled,
                     children: _buildChildren(doc, context),
                   ),
                 ),
@@ -484,26 +489,25 @@ class QuillRawEditorState extends EditorState
           link: _toolbarLayerLink,
           child: Semantics(
             child: MouseRegion(
-              cursor: widget.configurations.readOnly
-                  ? widget.configurations.readOnlyMouseCursor
+              cursor: widget.config.readOnly
+                  ? widget.config.readOnlyMouseCursor
                   : SystemMouseCursors.text,
               child: QuillRawEditorMultiChildRenderObject(
                 key: _editorKey,
                 document: doc,
                 selection: controller.selection,
                 hasFocus: _hasFocus,
-                scrollable: widget.configurations.scrollable,
+                scrollable: widget.config.scrollable,
                 cursorController: _cursorCont,
                 textDirection: _textDirection,
                 startHandleLayerLink: _startHandleLayerLink,
                 endHandleLayerLink: _endHandleLayerLink,
                 onSelectionChanged: _handleSelectionChanged,
                 onSelectionCompleted: _handleSelectionCompleted,
-                scrollBottomInset: widget.configurations.scrollBottomInset,
-                padding: widget.configurations.padding,
-                maxContentWidth: widget.configurations.maxContentWidth,
-                floatingCursorDisabled:
-                    widget.configurations.floatingCursorDisabled,
+                scrollBottomInset: widget.config.scrollBottomInset,
+                padding: widget.config.padding,
+                maxContentWidth: widget.config.maxContentWidth,
+                floatingCursorDisabled: widget.config.floatingCursorDisabled,
                 children: _buildChildren(doc, context),
               ),
             ),
@@ -511,37 +515,37 @@ class QuillRawEditorState extends EditorState
         ),
       );
     }
-    final constraints = widget.configurations.expands
+    final constraints = widget.config.expands
         ? const BoxConstraints.expand()
         : BoxConstraints(
-            minHeight: widget.configurations.minHeight ?? 0.0,
-            maxHeight: widget.configurations.maxHeight ?? double.infinity,
+            minHeight: widget.config.minHeight ?? 0.0,
+            maxHeight: widget.config.maxHeight ?? double.infinity,
           );
 
     return TextFieldTapRegion(
-      enabled: widget.configurations.isOnTapOutsideEnabled,
+      enabled: widget.config.onTapOutsideEnabled,
       onTapOutside: (event) {
-        final onTapOutside = widget.configurations.onTapOutside;
+        final onTapOutside = widget.config.onTapOutside;
         if (onTapOutside != null) {
-          onTapOutside.call(event, widget.configurations.focusNode);
+          onTapOutside.call(event, widget.config.focusNode);
           return;
         }
         _defaultOnTapOutside(event);
       },
       child: QuillStyles(
         data: _styles!,
-        child: QuillKeyboardServiceWidget(
-          actions: _actions,
-          characterEvents: widget.configurations.characterShortcutEvents,
-          spaceEvents: widget.configurations.spaceShortcutEvents,
+        child: EditorKeyboardShortcuts(
+          actions: _shortcutActionsManager.actions,
+          onKeyPressed: widget.config.onKeyPressed,
+          characterEvents: widget.config.characterShortcutEvents,
+          spaceEvents: widget.config.spaceShortcutEvents,
           constraints: constraints,
-          focusNode: widget.configurations.focusNode,
+          focusNode: widget.config.focusNode,
           controller: controller,
-          readOnly: widget.configurations.readOnly,
-          enableAlwaysIndentOnTab:
-              widget.configurations.enableAlwaysIndentOnTab,
-          customShortcuts: widget.configurations.customShortcuts,
-          customActions: widget.configurations.customActions,
+          readOnly: widget.config.readOnly,
+          enableAlwaysIndentOnTab: widget.config.enableAlwaysIndentOnTab,
+          customShortcuts: widget.config.customShortcuts,
+          customActions: widget.config.customActions,
           child: child,
         ),
       ),
@@ -555,15 +559,9 @@ class QuillRawEditorState extends EditorState
     final oldSelection = controller.selection;
     controller.updateSelection(selection, ChangeSource.local);
 
-    if (_selectionOverlay == null) {
-      _selectionOverlay = _createSelectionOverlay();
-    } else {
-      _selectionOverlay!.update(textEditingValue);
-    }
     _selectionOverlay?.handlesVisible = _shouldShowSelectionHandles();
-    _selectionOverlay?.showHandles();
 
-    if (!_hasFocus) {
+    if (!_keyboardVisible) {
       // This will show the keyboard for all selection changes on the
       // editor, not just changes triggered by user gestures.
       requestKeyboard();
@@ -588,10 +586,8 @@ class QuillRawEditorState extends EditorState
   /// by changing its attribute according to [value].
   void _handleCheckboxTap(int offset, bool value) {
     final requestKeyboardFocusOnCheckListChanged =
-        widget.configurations.requestKeyboardFocusOnCheckListChanged;
-    if (!(widget.configurations.checkBoxReadOnly ??
-        widget.configurations.readOnly)) {
-      _disableScrollControllerAnimateOnce = true;
+        widget.config.requestKeyboardFocusOnCheckListChanged;
+    if (!(widget.config.checkBoxReadOnly ?? widget.config.readOnly)) {
       final currentSelection = controller.selection.copyWith();
       final attribute = value ? Attribute.checked : Attribute.unchecked;
 
@@ -640,40 +636,41 @@ class QuillRawEditorState extends EditorState
       prevNodeOl = attrs[Attribute.list.key] == Attribute.ol;
       final nodeTextDirection = getDirectionOfNode(node, _textDirection);
       if (node is Line) {
-        final editableTextLine = _getEditableTextLineFromNode(node, context);
+        final editableTextLine =
+            _getEditableTextLineFromNode(node, context, attrs);
         result.add(Directionality(
             textDirection: nodeTextDirection, child: editableTextLine));
       } else if (node is Block) {
         final editableTextBlock = EditableTextBlock(
           block: node,
           controller: controller,
-          customLeadingBlockBuilder: widget.configurations.customLeadingBuilder,
+          customLeadingBlockBuilder: widget.config.customLeadingBuilder,
           textDirection: nodeTextDirection,
-          scrollBottomInset: widget.configurations.scrollBottomInset,
+          scrollBottomInset: widget.config.scrollBottomInset,
           horizontalSpacing: _getHorizontalSpacingForBlock(node, _styles),
           verticalSpacing: _getVerticalSpacingForBlock(node, _styles),
           textSelection: controller.selection,
-          color: widget.configurations.selectionColor,
+          color: widget.config.selectionColor,
           styles: _styles,
-          enableInteractiveSelection:
-              widget.configurations.enableInteractiveSelection,
+          enableInteractiveSelection: widget.config.enableInteractiveSelection,
           hasFocus: _hasFocus,
           contentPadding: attrs.containsKey(Attribute.codeBlock.key)
               ? const EdgeInsets.all(16)
               : null,
-          embedBuilder: widget.configurations.embedBuilder,
+          embedBuilder: widget.config.embedBuilder,
+          textSpanBuilder: widget.config.textSpanBuilder,
           linkActionPicker: _linkActionPicker,
-          onLaunchUrl: widget.configurations.onLaunchUrl,
+          onLaunchUrl: widget.config.onLaunchUrl,
           cursorCont: _cursorCont,
           indentLevelCounts: indentLevelCounts,
           clearIndents: clearIndents,
           onCheckboxTap: _handleCheckboxTap,
-          readOnly: widget.configurations.readOnly,
-          checkBoxReadOnly: widget.configurations.checkBoxReadOnly,
-          customRecognizerBuilder:
-              widget.configurations.customRecognizerBuilder,
-          customStyleBuilder: widget.configurations.customStyleBuilder,
-          customLinkPrefixes: widget.configurations.customLinkPrefixes,
+          readOnly: widget.config.readOnly,
+          checkBoxReadOnly: widget.config.checkBoxReadOnly,
+          customRecognizerBuilder: widget.config.customRecognizerBuilder,
+          customStyleBuilder: widget.config.customStyleBuilder,
+          customLinkPrefixes: widget.config.customLinkPrefixes,
+          composingRange: composingRange.value,
         );
         result.add(
           Directionality(
@@ -693,19 +690,21 @@ class QuillRawEditorState extends EditorState
   }
 
   EditableTextLine _getEditableTextLineFromNode(
-      Line node, BuildContext context) {
+      Line node, BuildContext context, Map<String, Attribute<dynamic>> attrs) {
     final textLine = TextLine(
       line: node,
       textDirection: _textDirection,
-      embedBuilder: widget.configurations.embedBuilder,
-      customStyleBuilder: widget.configurations.customStyleBuilder,
-      customRecognizerBuilder: widget.configurations.customRecognizerBuilder,
+      embedBuilder: widget.config.embedBuilder,
+      textSpanBuilder: widget.config.textSpanBuilder,
+      customStyleBuilder: widget.config.customStyleBuilder,
+      customRecognizerBuilder: widget.config.customRecognizerBuilder,
       styles: _styles!,
-      readOnly: widget.configurations.readOnly,
+      readOnly: widget.config.readOnly,
       controller: controller,
       linkActionPicker: _linkActionPicker,
-      onLaunchUrl: widget.configurations.onLaunchUrl,
-      customLinkPrefixes: widget.configurations.customLinkPrefixes,
+      onLaunchUrl: widget.config.onLaunchUrl,
+      customLinkPrefixes: widget.config.customLinkPrefixes,
+      composingRange: composingRange.value,
     );
     final editableTextLine = EditableTextLine(
         node,
@@ -715,12 +714,13 @@ class QuillRawEditorState extends EditorState
         _getVerticalSpacingForLine(node, _styles),
         _textDirection,
         controller.selection,
-        widget.configurations.selectionColor,
-        widget.configurations.enableInteractiveSelection,
+        widget.config.selectionColor,
+        widget.config.enableInteractiveSelection,
         _hasFocus,
         MediaQuery.devicePixelRatioOf(context),
         _cursorCont,
-        _styles!.inlineCode!);
+        _styles!.inlineCode!,
+        _getDecoration(node, _styles, attrs));
     return editableTextLine;
   }
 
@@ -824,6 +824,30 @@ class QuillRawEditorState extends EditorState
     return VerticalSpacing.zero;
   }
 
+  BoxDecoration? _getDecoration(Node node, DefaultStyles? defaultStyles,
+      Map<String, Attribute<dynamic>> attrs) {
+    if (attrs.containsKey(Attribute.header.key)) {
+      final level = attrs[Attribute.header.key]!.value;
+      switch (level) {
+        case 1:
+          return defaultStyles!.h1!.decoration;
+        case 2:
+          return defaultStyles!.h2!.decoration;
+        case 3:
+          return defaultStyles!.h3!.decoration;
+        case 4:
+          return defaultStyles!.h4!.decoration;
+        case 5:
+          return defaultStyles!.h5!.decoration;
+        case 6:
+          return defaultStyles!.h6!.decoration;
+        default:
+          throw ArgumentError('Invalid level $level');
+      }
+    }
+    return null;
+  }
+
   void _didChangeTextEditingValueListener() {
     _didChangeTextEditingValue(controller.ignoreFocusOnTextChange);
   }
@@ -831,18 +855,21 @@ class QuillRawEditorState extends EditorState
   @override
   void initState() {
     super.initState();
+    _shortcutActionsManager = EditorKeyboardShortcutsActionsManager(
+      rawEditorState: this,
+      context: context,
+    );
+
     if (_clipboardStatus != null) {
       _clipboardStatus!.addListener(_onChangedClipboardStatus);
     }
 
-    controller.addListener(_didChangeTextEditingValueListener);
-
-    _scrollController = widget.configurations.scrollController;
+    _scrollController = widget.config.scrollController;
     _scrollController.addListener(_updateSelectionOverlayForScroll);
 
     _cursorCont = CursorCont(
-      show: ValueNotifier<bool>(widget.configurations.showCursor),
-      style: widget.configurations.cursorStyle,
+      show: ValueNotifier<bool>(widget.config.showCursor),
+      style: widget.config.cursorStyle,
       tickerProvider: this,
     );
 
@@ -876,8 +903,14 @@ class QuillRawEditorState extends EditorState
       });
     }
 
-    // Focus
-    widget.configurations.focusNode.addListener(_handleFocusChanged);
+    controller.addListener(_didChangeTextEditingValueListener);
+
+    if (!widget.config.readOnly) {
+      // listen to composing range changes
+      composingRange.addListener(_onComposingRangeChanged);
+      // Focus
+      widget.config.focusNode.addListener(_handleFocusChanged);
+    }
   }
 
   // KeyboardVisibilityController only checks for keyboards that
@@ -910,8 +943,8 @@ class QuillRawEditorState extends EditorState
         ? defaultStyles.merge(parentStyles)
         : defaultStyles;
 
-    if (widget.configurations.customStyles != null) {
-      _styles = _styles!.merge(widget.configurations.customStyles!);
+    if (widget.config.customStyles != null) {
+      _styles = _styles!.merge(widget.config.customStyles!);
     }
 
     _requestAutoFocusIfShould();
@@ -919,9 +952,9 @@ class QuillRawEditorState extends EditorState
 
   Future<void> _requestAutoFocusIfShould() async {
     final focusManager = FocusScope.of(context);
-    if (!_didAutoFocus && widget.configurations.autoFocus) {
+    if (!_didAutoFocus && widget.config.autoFocus) {
       await Future.delayed(Duration.zero); // To avoid exceptions
-      focusManager.autofocus(widget.configurations.focusNode);
+      focusManager.autofocus(widget.config.focusNode);
       _didAutoFocus = true;
     }
   }
@@ -930,8 +963,8 @@ class QuillRawEditorState extends EditorState
   void didUpdateWidget(QuillRawEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    _cursorCont.show.value = widget.configurations.showCursor;
-    _cursorCont.style = widget.configurations.cursorStyle;
+    _cursorCont.show.value = widget.config.showCursor;
+    _cursorCont.style = widget.config.cursorStyle;
 
     if (controller != oldWidget.controller) {
       oldWidget.controller.removeListener(_didChangeTextEditingValue);
@@ -939,15 +972,15 @@ class QuillRawEditorState extends EditorState
       updateRemoteValueIfNeeded();
     }
 
-    if (widget.configurations.scrollController != _scrollController) {
+    if (widget.config.scrollController != _scrollController) {
       _scrollController.removeListener(_updateSelectionOverlayForScroll);
-      _scrollController = widget.configurations.scrollController;
+      _scrollController = widget.config.scrollController;
       _scrollController.addListener(_updateSelectionOverlayForScroll);
     }
 
-    if (widget.configurations.focusNode != oldWidget.configurations.focusNode) {
-      oldWidget.configurations.focusNode.removeListener(_handleFocusChanged);
-      widget.configurations.focusNode.addListener(_handleFocusChanged);
+    if (widget.config.focusNode != oldWidget.config.focusNode) {
+      oldWidget.config.focusNode.removeListener(_handleFocusChanged);
+      widget.config.focusNode.addListener(_handleFocusChanged);
       updateKeepAlive();
     }
 
@@ -959,25 +992,24 @@ class QuillRawEditorState extends EditorState
     if (!shouldCreateInputConnection) {
       closeConnectionIfNeeded();
     } else {
-      if (oldWidget.configurations.readOnly && _hasFocus) {
+      if (oldWidget.config.readOnly && _hasFocus) {
         openConnectionIfNeeded();
       }
     }
 
     // in case customStyles changed in new widget
-    if (widget.configurations.customStyles != null) {
-      _styles = _styles!.merge(widget.configurations.customStyles!);
+    if (widget.config.customStyles != null) {
+      _styles = _styles!.merge(widget.config.customStyles!);
     }
   }
 
   bool _shouldShowSelectionHandles() {
-    return widget.configurations.showSelectionHandles &&
+    return widget.config.showSelectionHandles &&
         !controller.selection.isCollapsed;
   }
 
   @override
   void dispose() {
-    hideMagnifier();
     closeConnectionIfNeeded();
     _keyboardVisibilitySubscription?.cancel();
     HardwareKeyboard.instance.removeHandler(_hardwareKeyboardEvent);
@@ -985,7 +1017,10 @@ class QuillRawEditorState extends EditorState
     _selectionOverlay?.dispose();
     _selectionOverlay = null;
     controller.removeListener(_didChangeTextEditingValueListener);
-    widget.configurations.focusNode.removeListener(_handleFocusChanged);
+    if (!widget.config.readOnly) {
+      widget.config.focusNode.removeListener(_handleFocusChanged);
+      composingRange.removeListener(_onComposingRangeChanged);
+    }
     _cursorCont.dispose();
     if (_clipboardStatus != null) {
       _clipboardStatus!
@@ -999,16 +1034,19 @@ class QuillRawEditorState extends EditorState
     _selectionOverlay?.updateForScroll();
   }
 
+  void _onComposingRangeChanged() {
+    if (!mounted) {
+      return;
+    }
+    _markNeedsBuild();
+  }
+
   /// Marks the editor as dirty and trigger a rebuild.
   ///
   /// When the editor is dirty methods that depend on the editor
   /// state being in sync with the controller know they may be
   /// operating on stale data.
   void _markNeedsBuild() {
-    if (_dirty) {
-      // No need to rebuilt if it already dirty
-      return;
-    }
     setState(() {
       _dirty = true;
     });
@@ -1034,7 +1072,31 @@ class QuillRawEditorState extends EditorState
       }
     }
 
-    _adjacentLineAction.stopCurrentVerticalRunIfSelectionChanges();
+    _shortcutActionsManager.adjacentLineAction
+        .stopCurrentVerticalRunIfSelectionChanges();
+  }
+
+  late double _lastBottomViewInset;
+
+  @override
+  void didChangeMetrics() {
+    if (!mounted) {
+      return;
+    }
+
+    // https://github.com/flutter/flutter/blob/3.29.0/packages/flutter/lib/src/widgets/editable_text.dart#L4311
+    final view = View.of(context);
+    if (_lastBottomViewInset != view.viewInsets.bottom) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        _selectionOverlay?.updateForScroll();
+      }, debugLabel: 'EditableText.updateForScroll');
+      if (_lastBottomViewInset < view.viewInsets.bottom) {
+        // Because the metrics change signal from engine will come here every frame
+        // (on both iOS and Android). So we don't need to show caret with animation.
+        _scheduleShowCaretOnScreen(withAnimation: false);
+      }
+    }
+    _lastBottomViewInset = view.viewInsets.bottom;
   }
 
   void _onChangeTextEditingValue([bool ignoreCaret = false]) {
@@ -1042,7 +1104,7 @@ class QuillRawEditorState extends EditorState
     if (ignoreCaret) {
       return;
     }
-    _showCaretOnScreen();
+    _scheduleShowCaretOnScreen(withAnimation: true);
     _cursorCont.startOrStopCursorTimerIfNeeded(_hasFocus, controller.selection);
     if (hasConnection) {
       // To keep the cursor from blinking while typing, we want to restart the
@@ -1073,37 +1135,31 @@ class QuillRawEditorState extends EditorState
 
   void _updateOrDisposeSelectionOverlayIfNeeded() {
     if (_selectionOverlay != null) {
-      if (_hasFocus) {
-        _selectionOverlay!.update(textEditingValue);
-      } else {
+      if (!_hasFocus || textEditingValue.selection.isCollapsed) {
         _selectionOverlay!.dispose();
         _selectionOverlay = null;
+      } else {
+        _selectionOverlay!.update(textEditingValue);
       }
     } else if (_hasFocus) {
-      _selectionOverlay = _createSelectionOverlay();
+      _selectionOverlay = EditorTextSelectionOverlay(
+        value: textEditingValue,
+        context: context,
+        debugRequiredFor: widget,
+        startHandleLayerLink: _startHandleLayerLink,
+        endHandleLayerLink: _endHandleLayerLink,
+        renderObject: renderEditor,
+        selectionCtrls: widget.config.selectionCtrls,
+        selectionDelegate: this,
+        clipboardStatus: _clipboardStatus,
+        contextMenuBuilder: widget.config.contextMenuBuilder == null
+            ? null
+            : (context) => widget.config.contextMenuBuilder!(context, this),
+        dragOffsetNotifier: widget.dragOffsetNotifier,
+      );
       _selectionOverlay!.handlesVisible = _shouldShowSelectionHandles();
       _selectionOverlay!.showHandles();
     }
-  }
-
-  EditorTextSelectionOverlay _createSelectionOverlay() {
-    return EditorTextSelectionOverlay(
-      value: textEditingValue,
-      context: context,
-      debugRequiredFor: widget,
-      startHandleLayerLink: _startHandleLayerLink,
-      endHandleLayerLink: _endHandleLayerLink,
-      renderObject: renderEditor,
-      selectionCtrls: widget.configurations.selectionCtrls,
-      selectionDelegate: this,
-      clipboardStatus: _clipboardStatus,
-      contextMenuBuilder: widget.configurations.contextMenuBuilder == null
-          ? null
-          : (context) =>
-              widget.configurations.contextMenuBuilder!(context, this),
-      magnifierConfiguration: widget.configurations.magnifierConfiguration ??
-          TextMagnifier.adaptiveMagnifierConfiguration,
-    );
   }
 
   void _handleFocusChanged() {
@@ -1118,7 +1174,8 @@ class QuillRawEditorState extends EditorState
     _updateOrDisposeSelectionOverlayIfNeeded();
     if (_hasFocus) {
       WidgetsBinding.instance.addObserver(this);
-      _showCaretOnScreen();
+      _lastBottomViewInset = View.of(context).viewInsets.bottom;
+      _scheduleShowCaretOnScreen(withAnimation: true);
     } else {
       WidgetsBinding.instance.removeObserver(this);
     }
@@ -1134,57 +1191,107 @@ class QuillRawEditorState extends EditorState
 
   Future<LinkMenuAction> _linkActionPicker(Node linkNode) async {
     final link = linkNode.style.attributes[Attribute.link.key]!.value!;
-    return widget.configurations
-        .linkActionPickerDelegate(context, link, linkNode);
+    return widget.config.linkActionPickerDelegate(context, link, linkNode);
   }
+
+  // Animation configuration for scrolling the caret back on screen.
+  static const Duration _caretAnimationDuration = Duration(milliseconds: 100);
+  static const Curve _caretAnimationCurve = Curves.fastOutSlowIn;
 
   bool _showCaretOnScreenScheduled = false;
 
-  // This is a workaround for checkbox tapping issue
-  // https://github.com/singerdmx/flutter-quill/issues/619
-  // We cannot treat {"list": "checked"} and {"list": "unchecked"} as
-  // block of the same style
-  // This causes controller.selection to go to offset 0
-  bool _disableScrollControllerAnimateOnce = false;
-
-  void _showCaretOnScreen() {
-    if (!widget.configurations.showCursor || _showCaretOnScreenScheduled) {
+  // Completely copied from flutter with some changes to fit flutter_quill:
+  // https://github.com/flutter/flutter/blob/3.29.0/packages/flutter/lib/src/widgets/editable_text.dart#L4228
+  void _scheduleShowCaretOnScreen({required bool withAnimation}) {
+    if (_showCaretOnScreenScheduled) {
       return;
     }
-
     _showCaretOnScreenScheduled = true;
     SchedulerBinding.instance.addPostFrameCallback((_) {
-      if (widget.configurations.scrollable || _scrollController.hasClients) {
-        _showCaretOnScreenScheduled = false;
+      _showCaretOnScreenScheduled = false;
+      // Since we are in a post frame callback, check currentContext in case
+      // RenderEditable has been disposed (in which case it will be null).
+      final renderEditor =
+          _editorKey.currentContext?.findRenderObject() as RenderEditor?;
+      if (renderEditor == null ||
+          !renderEditor.selection.isValid ||
+          !_scrollController.hasClients) {
+        return;
+      }
 
-        if (!mounted) {
-          return;
-        }
+      final lineHeight =
+          renderEditor.preferredLineHeight(renderEditor.caretTextPosition);
 
-        final viewport = RenderAbstractViewport.of(renderEditor);
-        final editorOffset =
-            renderEditor.localToGlobal(const Offset(0, 0), ancestor: viewport);
-        final offsetInViewport = _scrollController.offset + editorOffset.dy;
+      // Enlarge the target rect by scrollPadding to ensure that caret is not
+      // positioned directly at the edge after scrolling.
+      var bottomSpacing = widget.config.padding.bottom;
+      if (_selectionOverlay?.selectionCtrls != null) {
+        final handleHeight =
+            _selectionOverlay!.selectionCtrls.getHandleSize(lineHeight).height;
 
-        final offset = renderEditor.getOffsetToRevealCursor(
-          _scrollController.position.viewportDimension,
-          _scrollController.offset,
-          offsetInViewport,
+        final double interactiveHandleHeight = math.max(
+          handleHeight,
+          kMinInteractiveDimension,
         );
 
-        if (offset != null) {
-          if (_disableScrollControllerAnimateOnce) {
-            _disableScrollControllerAnimateOnce = false;
-            return;
-          }
-          _scrollController.animateTo(
-            math.min(offset, _scrollController.position.maxScrollExtent),
-            duration: const Duration(milliseconds: 100),
-            curve: Curves.fastOutSlowIn,
-          );
-        }
+        final anchor = _selectionOverlay!.selectionCtrls.getHandleAnchor(
+          TextSelectionHandleType.collapsed,
+          lineHeight,
+        );
+
+        final handleCenter = handleHeight / 2 - anchor.dy;
+        bottomSpacing = math.max(
+          handleCenter + interactiveHandleHeight / 2,
+          bottomSpacing,
+        );
       }
-    });
+
+      final caretPadding =
+          widget.config.padding.copyWith(bottom: bottomSpacing);
+
+      final caretRect =
+          renderEditor.getLocalRectForCaret(renderEditor.caretTextPosition);
+      final targetOffset = _getOffsetToRevealCaret(caretRect);
+
+      Rect? rectToReveal;
+      final selection = textEditingValue.selection;
+      if (selection.isCollapsed) {
+        rectToReveal = targetOffset.rect;
+      } else {
+        // TODO: I'm not sure how to get getBoxesForSelection in flutter_quill or do we even has it?
+        // Currently just return targetOffset.rect.
+        //
+        // final List<TextBox> selectionBoxes =
+        //     renderEditor.getBoxesForSelection(selection);
+        // // selectionBoxes may be empty if, for example, the selection does not
+        // // encompass a full character, like if it only contained part of an
+        // // extended grapheme cluster.
+        // if (selectionBoxes.isEmpty) {
+        //   rectToReveal = targetOffset.rect;
+        // } else {
+        //   rectToReveal = selection.baseOffset < selection.extentOffset
+        //       ? selectionBoxes.last.toRect()
+        //       : selectionBoxes.first.toRect();
+        // }
+        rectToReveal = targetOffset.rect;
+      }
+
+      if (withAnimation) {
+        _scrollController.animateTo(
+          targetOffset.offset,
+          duration: _caretAnimationDuration,
+          curve: _caretAnimationCurve,
+        );
+        renderEditor.showOnScreen(
+          rect: caretPadding.inflateRect(rectToReveal),
+          duration: _caretAnimationDuration,
+          curve: _caretAnimationCurve,
+        );
+      } else {
+        _scrollController.jumpTo(targetOffset.offset);
+        renderEditor.showOnScreen(rect: caretPadding.inflateRect(rectToReveal));
+      }
+    }, debugLabel: 'EditableText.showCaret');
   }
 
   /// The renderer for this widget's editor descendant.
@@ -1204,7 +1311,6 @@ class QuillRawEditorState extends EditorState
   @override
   void requestKeyboard() {
     if (controller.skipRequestKeyboard) {
-      // and that just by one simple change
       controller.skipRequestKeyboard = false;
       return;
     }
@@ -1215,13 +1321,13 @@ class QuillRawEditorState extends EditorState
         /// delay 500 milliseconds for waiting keyboard show up
         Future.delayed(
           const Duration(milliseconds: 500),
-          _showCaretOnScreen,
+          () => _scheduleShowCaretOnScreen(withAnimation: true),
         );
       } else {
-        _showCaretOnScreen();
+        _scheduleShowCaretOnScreen(withAnimation: true);
       }
     } else {
-      widget.configurations.focusNode.requestFocus();
+      widget.config.focusNode.requestFocus();
     }
   }
 
@@ -1256,196 +1362,13 @@ class QuillRawEditorState extends EditorState
   }
 
   @override
-  void toggleToolbar([bool hideHandles = true]) {
-    final selectionOverlay = _selectionOverlay ??= _createSelectionOverlay();
-    if (selectionOverlay.handlesVisible) {
-      hideToolbar(hideHandles);
-    } else {
-      showToolbar();
-    }
-  }
-
-  void _replaceText(ReplaceTextIntent intent) {
-    userUpdateTextEditingValue(
-      intent.currentTextEditingValue
-          .replaced(intent.replacementRange, intent.replacementText),
-      intent.cause,
-    );
-  }
-
-  @override
-  bool get wantKeepAlive => widget.configurations.focusNode.hasFocus;
+  bool get wantKeepAlive => widget.config.focusNode.hasFocus;
 
   @override
   AnimationController get floatingCursorResetController =>
       _floatingCursorResetController;
 
   late AnimationController _floatingCursorResetController;
-
-  // --------------------------- Text Editing Actions --------------------------
-
-  QuillEditorTextBoundary _characterBoundary(
-      DirectionalTextEditingIntent intent) {
-    final atomicTextBoundary = QuillEditorCharacterBoundary(textEditingValue);
-    return QuillEditorCollapsedSelectionBoundary(
-        atomicTextBoundary, intent.forward);
-  }
-
-  QuillEditorTextBoundary _nextWordBoundary(
-      DirectionalTextEditingIntent intent) {
-    final QuillEditorTextBoundary atomicTextBoundary;
-    final QuillEditorTextBoundary boundary;
-
-    // final TextEditingValue textEditingValue =
-    //     _textEditingValueForTextLayoutMetrics;
-    atomicTextBoundary = QuillEditorCharacterBoundary(textEditingValue);
-    // This isn't enough. Newline characters.
-    boundary = QuillEditorExpandedTextBoundary(
-        QuillEditorWhitespaceBoundary(textEditingValue),
-        QuillEditorWordBoundary(renderEditor, textEditingValue));
-
-    final mixedBoundary = intent.forward
-        ? QuillEditorMixedBoundary(atomicTextBoundary, boundary)
-        : QuillEditorMixedBoundary(boundary, atomicTextBoundary);
-    // Use a _MixedBoundary to make sure we don't leave invalid codepoints in
-    // the field after deletion.
-    return QuillEditorCollapsedSelectionBoundary(mixedBoundary, intent.forward);
-  }
-
-  QuillEditorTextBoundary _linebreak(DirectionalTextEditingIntent intent) {
-    final QuillEditorTextBoundary atomicTextBoundary;
-    final QuillEditorTextBoundary boundary;
-
-    // final TextEditingValue textEditingValue =
-    //     _textEditingValueforTextLayoutMetrics;
-    atomicTextBoundary = QuillEditorCharacterBoundary(textEditingValue);
-    boundary = QuillEditorLineBreak(renderEditor, textEditingValue);
-
-    // The _MixedBoundary is to make sure we don't leave invalid code units in
-    // the field after deletion.
-    // `boundary` doesn't need to be wrapped in a _CollapsedSelectionBoundary,
-    // since the document boundary is unique and the linebreak boundary is
-    // already caret-location based.
-    return intent.forward
-        ? QuillEditorMixedBoundary(
-            QuillEditorCollapsedSelectionBoundary(atomicTextBoundary, true),
-            boundary)
-        : QuillEditorMixedBoundary(
-            boundary,
-            QuillEditorCollapsedSelectionBoundary(atomicTextBoundary, false),
-          );
-  }
-
-  QuillEditorTextBoundary _documentBoundary(
-          DirectionalTextEditingIntent intent) =>
-      QuillEditorDocumentBoundary(textEditingValue);
-
-  Action<T> _makeOverridable<T extends Intent>(Action<T> defaultAction) {
-    return Action<T>.overridable(
-        context: context, defaultAction: defaultAction);
-  }
-
-  late final Action<ReplaceTextIntent> _replaceTextAction =
-      CallbackAction<ReplaceTextIntent>(onInvoke: _replaceText);
-
-  void _updateSelection(UpdateSelectionIntent intent) {
-    userUpdateTextEditingValue(
-      intent.currentTextEditingValue.copyWith(selection: intent.newSelection),
-      intent.cause,
-    );
-  }
-
-  late final Action<UpdateSelectionIntent> _updateSelectionAction =
-      CallbackAction<UpdateSelectionIntent>(onInvoke: _updateSelection);
-
-  late final QuillEditorUpdateTextSelectionToAdjacentLineAction<
-          ExtendSelectionVerticallyToAdjacentLineIntent> _adjacentLineAction =
-      QuillEditorUpdateTextSelectionToAdjacentLineAction<
-          ExtendSelectionVerticallyToAdjacentLineIntent>(this);
-
-  late final _adjacentPageAction =
-      QuillEditorUpdateTextSelectionToAdjacentPageAction<
-          ExtendSelectionVerticallyToAdjacentPageIntent>(this);
-
-  late final QuillEditorToggleTextStyleAction _formatSelectionAction =
-      QuillEditorToggleTextStyleAction(this);
-
-  late final QuillEditorIndentSelectionAction _indentSelectionAction =
-      QuillEditorIndentSelectionAction(this);
-
-  late final QuillEditorOpenSearchAction _openSearchAction =
-      QuillEditorOpenSearchAction(this);
-  late final QuillEditorApplyHeaderAction _applyHeaderAction =
-      QuillEditorApplyHeaderAction(this);
-  late final QuillEditorApplyCheckListAction _applyCheckListAction =
-      QuillEditorApplyCheckListAction(this);
-
-  late final Map<Type, Action<Intent>> _actions = <Type, Action<Intent>>{
-    DoNothingAndStopPropagationTextIntent: DoNothingAction(consumesKey: false),
-    ReplaceTextIntent: _replaceTextAction,
-    UpdateSelectionIntent: _updateSelectionAction,
-    DirectionalFocusIntent: DirectionalFocusAction.forTextField(),
-
-    // Delete
-    DeleteCharacterIntent: _makeOverridable(
-        QuillEditorDeleteTextAction<DeleteCharacterIntent>(
-            this, _characterBoundary)),
-    DeleteToNextWordBoundaryIntent: _makeOverridable(
-        QuillEditorDeleteTextAction<DeleteToNextWordBoundaryIntent>(
-            this, _nextWordBoundary)),
-    DeleteToLineBreakIntent: _makeOverridable(
-        QuillEditorDeleteTextAction<DeleteToLineBreakIntent>(this, _linebreak)),
-
-    // Extend/Move Selection
-    ExtendSelectionByCharacterIntent: _makeOverridable(
-        QuillEditorUpdateTextSelectionAction<ExtendSelectionByCharacterIntent>(
-      this,
-      false,
-      _characterBoundary,
-    )),
-    ExtendSelectionToNextWordBoundaryIntent: _makeOverridable(
-        QuillEditorUpdateTextSelectionAction<
-                ExtendSelectionToNextWordBoundaryIntent>(
-            this, true, _nextWordBoundary)),
-    ExtendSelectionToLineBreakIntent: _makeOverridable(
-        QuillEditorUpdateTextSelectionAction<ExtendSelectionToLineBreakIntent>(
-            this, true, _linebreak)),
-    ExtendSelectionVerticallyToAdjacentLineIntent:
-        _makeOverridable(_adjacentLineAction),
-    ExtendSelectionToDocumentBoundaryIntent: _makeOverridable(
-        QuillEditorUpdateTextSelectionAction<
-                ExtendSelectionToDocumentBoundaryIntent>(
-            this, true, _documentBoundary)),
-    ExtendSelectionToNextWordBoundaryOrCaretLocationIntent: _makeOverridable(
-        QuillEditorExtendSelectionOrCaretPositionAction(
-            this, _nextWordBoundary)),
-
-    // Copy Paste
-    SelectAllTextIntent: _makeOverridable(QuillEditorSelectAllAction(this)),
-    CopySelectionTextIntent:
-        _makeOverridable(QuillEditorCopySelectionAction(this)),
-    PasteTextIntent: _makeOverridable(CallbackAction<PasteTextIntent>(
-        onInvoke: (intent) => pasteText(intent.cause))),
-
-    HideSelectionToolbarIntent:
-        _makeOverridable(QuillEditorHideSelectionToolbarAction(this)),
-    UndoTextIntent: _makeOverridable(QuillEditorUndoKeyboardAction(this)),
-    RedoTextIntent: _makeOverridable(QuillEditorRedoKeyboardAction(this)),
-
-    OpenSearchIntent: _openSearchAction,
-
-    // Selection Formatting
-    ToggleTextStyleIntent: _formatSelectionAction,
-    IndentSelectionIntent: _indentSelectionAction,
-    QuillEditorApplyHeaderIntent: _applyHeaderAction,
-    QuillEditorApplyCheckListIntent: _applyCheckListAction,
-    QuillEditorApplyLinkIntent: QuillEditorApplyLinkAction(this),
-    ScrollToDocumentBoundaryIntent: NavigateToDocumentBoundaryAction(this),
-
-    //  Paging and scrolling
-    ExtendSelectionVerticallyToAdjacentPageIntent: _adjacentPageAction,
-    ScrollIntent: QuillEditorScrollAction(this),
-  };
 
   @override
   void insertTextPlaceholder(Size size) {
@@ -1467,16 +1390,24 @@ class QuillRawEditorState extends EditorState
     // TODO: implement didChangeInputControl
   }
 
+  /// macOS-specific method that should not be called on other platforms.
+  /// This method interacts with the `NSStandardKeyBindingResponding` protocol
+  /// from Cocoa, which is available only on macOS systems.
   @override
   void performSelector(String selectorName) {
+    assert(
+      isMacOSApp,
+      'Should call performSelector() only on macOS desktop platform.',
+    );
     final intent = intentForMacOSSelector(selectorName);
-
-    if (intent != null) {
-      final primaryContext = primaryFocus?.context;
-      if (primaryContext != null) {
-        Actions.invoke(primaryContext, intent);
-      }
+    if (intent == null) {
+      return;
     }
+    final primaryContext = primaryFocus?.context;
+    if (primaryContext == null) {
+      return;
+    }
+    Actions.invoke(primaryContext, intent);
   }
 
   @override
@@ -1490,28 +1421,4 @@ class QuillRawEditorState extends EditorState
 
   @override
   bool get shareEnabled => false;
-
-  @override
-  void hideMagnifier() {
-    if (_selectionOverlay == null) return;
-    _selectionOverlay?.hideMagnifier();
-  }
-
-  @override
-  void showMagnifier(ui.Offset positionToShow) {
-    if (_hasFocus == false) return;
-    if (_selectionOverlay == null) return;
-    final position = renderEditor.getPositionForOffset(positionToShow);
-    if (_selectionOverlay!.magnifierIsVisible) {
-      _selectionOverlay!
-          .updateMagnifier(position, positionToShow, renderEditor);
-    } else {
-      _selectionOverlay!.showMagnifier(position, positionToShow, renderEditor);
-    }
-  }
-
-  @override
-  void updateMagnifier(ui.Offset positionToShow) {
-    showMagnifier(positionToShow);
-  }
 }

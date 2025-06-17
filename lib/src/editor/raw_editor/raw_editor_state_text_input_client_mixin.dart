@@ -1,11 +1,11 @@
 import 'dart:ui' show lerpDouble;
 
-import 'package:flutter/animation.dart' show Curves;
-import 'package:flutter/cupertino.dart' show CupertinoTheme;
-import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:flutter/material.dart' show Theme;
-import 'package:flutter/scheduler.dart' show SchedulerBinding;
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:meta/meta.dart';
 
 import '../../delta/delta_diff.dart';
 import '../../document/document.dart';
@@ -15,7 +15,22 @@ import 'raw_editor.dart';
 mixin RawEditorStateTextInputClientMixin on EditorState
     implements TextInputClient {
   TextInputConnection? _textInputConnection;
-  TextEditingValue? _lastKnownRemoteTextEditingValue;
+  TextEditingValue? __lastKnownRemoteTextEditingValue;
+
+  set _lastKnownRemoteTextEditingValue(TextEditingValue? value) {
+    __lastKnownRemoteTextEditingValue = value;
+    if (composingRange.value != value?.composing) {
+      composingRange.value = value?.composing ?? TextRange.empty;
+    }
+  }
+
+  TextEditingValue? get _lastKnownRemoteTextEditingValue =>
+      __lastKnownRemoteTextEditingValue;
+
+  /// The range of text that is currently being composed.
+  final ValueNotifier<TextRange> composingRange = ValueNotifier<TextRange>(
+    TextRange.empty,
+  );
 
   /// Whether to create an input connection with the platform for text editing
   /// or not.
@@ -30,8 +45,7 @@ mixin RawEditorStateTextInputClientMixin on EditorState
   /// - cmd/ctrl+c shortcut to copy.
   /// - cmd/ctrl+a to select all.
   /// - Changing the selection using a physical keyboard.
-  bool get shouldCreateInputConnection =>
-      kIsWeb || !widget.configurations.readOnly;
+  bool get shouldCreateInputConnection => kIsWeb || !widget.config.readOnly;
 
   /// Returns `true` if there is open input connection.
   bool get hasConnection =>
@@ -40,13 +54,21 @@ mixin RawEditorStateTextInputClientMixin on EditorState
   /// Opens or closes input connection based on the current state of
   /// [focusNode] and [value].
   void openOrCloseConnection() {
-    if (widget.configurations.focusNode.hasFocus &&
-        widget.configurations.focusNode.consumeKeyboardToken()) {
+    if (widget.config.focusNode.hasFocus &&
+        widget.config.focusNode.consumeKeyboardToken()) {
       openConnectionIfNeeded();
-    } else if (!widget.configurations.focusNode.hasFocus) {
+    } else if (!widget.config.focusNode.hasFocus) {
       closeConnectionIfNeeded();
     }
   }
+
+  /// This setting is only honored on iOS devices.
+  @visibleForTesting
+  @internal
+  Brightness createKeyboardAppearance() =>
+      widget.config.keyboardAppearance ??
+      CupertinoTheme.maybeBrightnessOf(context) ??
+      Theme.of(context).brightness;
 
   void openConnectionIfNeeded() {
     if (!shouldCreateInputConnection) {
@@ -59,18 +81,14 @@ mixin RawEditorStateTextInputClientMixin on EditorState
         this,
         TextInputConfiguration(
           inputType: TextInputType.multiline,
-          readOnly: widget.configurations.readOnly,
-          inputAction: widget.configurations.textInputAction,
-          enableSuggestions: !widget.configurations.readOnly,
-          keyboardAppearance: widget.configurations.keyboardAppearance ??
-              CupertinoTheme.maybeBrightnessOf(context) ??
-              Theme.of(context).brightness,
-          textCapitalization: widget.configurations.textCapitalization,
-          allowedMimeTypes:
-              widget.configurations.contentInsertionConfiguration == null
-                  ? const <String>[]
-                  : widget.configurations.contentInsertionConfiguration!
-                      .allowedMimeTypes,
+          readOnly: widget.config.readOnly,
+          inputAction: widget.config.textInputAction,
+          enableSuggestions: !widget.config.readOnly,
+          keyboardAppearance: createKeyboardAppearance(),
+          textCapitalization: widget.config.textCapitalization,
+          allowedMimeTypes: widget.config.contentInsertionConfiguration == null
+              ? const <String>[]
+              : widget.config.contentInsertionConfiguration!.allowedMimeTypes,
         ),
       );
 
@@ -102,10 +120,12 @@ mixin RawEditorStateTextInputClientMixin on EditorState
         textEditingValue.composing;
     if (hasConnection) {
       assert(mounted);
-      final offset = composingRange.isValid ? composingRange.start : 0;
-      final composingRect =
-          renderEditor.getLocalRectForCaret(TextPosition(offset: offset));
-      _textInputConnection!.setComposingRect(composingRect);
+      if (composingRange.isValid) {
+        final offset = composingRange.start;
+        final composingRect =
+            renderEditor.getLocalRectForCaret(TextPosition(offset: offset));
+        _textInputConnection!.setComposingRect(composingRect);
+      }
       SchedulerBinding.instance
           .addPostFrameCallback((_) => _updateComposingRectIfNeeded());
     }
@@ -224,7 +244,7 @@ mixin RawEditorStateTextInputClientMixin on EditorState
 
   @override
   void performAction(TextInputAction action) {
-    widget.configurations.onPerformAction?.call(action);
+    widget.config.onPerformAction?.call(action);
   }
 
   @override
