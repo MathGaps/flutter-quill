@@ -193,7 +193,7 @@ class _TextLineState extends State<TextLine> {
   }
 
   InlineSpan _getTextSpanForWholeLine() {
-    var lineStyle = _getLineStyle(widget.styles);
+    final lineStyle = _getLineStyle(widget.styles);
     if (!widget.line.hasEmbed) {
       return _buildTextSpan(
         widget.styles,
@@ -223,8 +223,10 @@ class _TextLineState extends State<TextLine> {
             ..applyStyle(child.style);
         }
 
+        // Get the text style for this specific embed without mutating lineStyle
+        var embedTextStyle = lineStyle;
         if (child.value.type == BlockEmbed.formulaType) {
-          lineStyle = lineStyle.merge(_getInlineTextStyle(
+          embedTextStyle = lineStyle.merge(_getInlineTextStyle(
             child.style,
             widget.styles,
             widget.line.style,
@@ -241,12 +243,28 @@ class _TextLineState extends State<TextLine> {
               node: child,
               readOnly: widget.readOnly,
               inline: true,
-              textStyle: lineStyle,
+              textStyle: embedTextStyle,
             ),
           ),
         );
         final embed = embedBuilder.buildWidgetSpan(embedWidget);
-        textSpanChildren.add(embed);
+
+        // Wrap the embed in a TextSpan with decoration styles so that
+        // underline/strikethrough can be rendered around the embed widget
+        if (embedTextStyle.decoration != null &&
+            embedTextStyle.decoration != TextDecoration.none) {
+          textSpanChildren.add(TextSpan(
+            style: TextStyle(
+              decoration: embedTextStyle.decoration,
+              decorationColor: embedTextStyle.decorationColor,
+              decorationStyle: embedTextStyle.decorationStyle,
+              decorationThickness: embedTextStyle.decorationThickness,
+            ),
+            children: [embed],
+          ));
+        } else {
+          textSpanChildren.add(embed);
+        }
         continue;
       }
 
