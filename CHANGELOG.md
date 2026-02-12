@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **BREAKING**: QuillEditorConfig is now accept `EdgeInsets padding` instead of `EdgeInsetsGeometry`.
-## [11.4.3] - 2026-02-12
+## [11.4.4] - 2026-02-12
 
 ### Changed
 - Ensure the scroll position is calculated and updated only after the layout is stable
