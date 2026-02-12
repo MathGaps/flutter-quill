@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > [!NOTE]
 > The [previous `CHANGELOG.md`](https://github.com/singerdmx/flutter-quill/blob/master/doc/OLD_CHANGELOG.md) has been archived.
 
+
+
+
 ## [Unreleased]
 
 ### Fixed
@@ -15,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **BREAKING**: QuillEditorConfig is now accept `EdgeInsets padding` instead of `EdgeInsetsGeometry`.
+## [11.4.3] - 2026-02-12
+
+### Changed
+- Ensure the scroll position is calculated and updated only after the layout is stable
+
+### Notes
+- Internal release to private registry (`pub.tutero.dev`).  
 
 ## [11.4.1] - 2025-05-15
 
