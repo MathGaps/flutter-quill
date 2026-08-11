@@ -371,6 +371,11 @@ mixin RawEditorStateTextInputClientMixin on EditorState
     // an exception
   }
 
+  /// Browser autofill blurs then refocuses the field; the editor does not
+  /// re-acquire focus on that prompt, so report that focus was not taken.
+  @override
+  bool onFocusReceived() => false;
+
   @override
   void connectionClosed() {
     if (!hasConnection) {
