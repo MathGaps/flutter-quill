@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **BREAKING**: QuillEditorConfig is now accept `EdgeInsets padding` instead of `EdgeInsetsGeometry`.
+
+## [11.4.5] - 2026-08-11
+
+### Fixed
+- Implement `TextInputClient.onFocusReceived`, added in Flutter 3.44. `RawEditorStateTextInputClientMixin` declares `implements TextInputClient`, so it must supply the member explicitly; without it, consumers fail to compile on 3.44. Returns `false`, matching the framework default, so behaviour on earlier Flutter versions is unchanged.
+
 ## [11.4.4] - 2026-02-12
 
 ### Changed
